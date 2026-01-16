@@ -1,38 +1,29 @@
 # Splay Engine Docker Image
-# For deployment on Render and other container platforms
-
 FROM python:3.11-slim
 
-# Set working directory
 WORKDIR /app
 
-# Install system dependencies (minimal)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy requirements first (for better caching)
+# Copy requirements and install
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy project files
-COPY pyproject.toml .
+# Copy source code
 COPY splay/ ./splay/
+COPY pyproject.toml .
 
-# Install the package
+# Install package in editable mode
 RUN pip install --no-cache-dir -e .
 
 # Create cache directory
 RUN mkdir -p /tmp/splay_cache
 
-# Default environment variables
+# Environment
 ENV SPLAY_CACHE_DIR=/tmp/splay_cache
 ENV SPLAY_ENV=production
 ENV ALLOWED_ORIGINS=*
-ENV PORT=8000
 
-# Expose the port (Render sets PORT dynamically)
-EXPOSE $PORT
+# Render sets PORT dynamically
+EXPOSE 10000
 
-# Run the API server
-# Note: Render sets $PORT automatically
-CMD uvicorn splay.api.app:app --host 0.0.0.0 --port ${PORT:-8000}
+# Start server
+CMD ["sh", "-c", "uvicorn splay.api.app:app --host 0.0.0.0 --port ${PORT:-10000}"]

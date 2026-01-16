@@ -123,16 +123,12 @@ class UncertainZone:
     """
     zone_id: str
     zone_type: str
-    player_id: str | None = None
-
-    # What we're uncertain about
     uncertainty_type: str  # "card_identity", "card_count", "splay_direction"
     question: str  # Human-readable question for UI
 
-    # Our best guess
+    # Optional fields (must come after required fields)
+    player_id: str | None = None
     detected_value: Any = None
-
-    # Possible alternatives
     alternatives: list[Any] = field(default_factory=list)
 
 
