@@ -22,8 +22,16 @@ from .proposal import (
     DetectedPlayer,
     ConfidenceLevel,
     UncertainZone,
+    SplayDirectionDetected,
+    PhotoInput,
 )
-from .processor import VisionProcessor
+from .processor import (
+    VisionProcessor,
+    MockVisionProcessor,
+    ManualInputProcessor,
+    InnovationVisionProcessor,
+    InnovationVisionConfig,
+)
 from .reconciler import StateReconciler, ReconciliationResult, Conflict
 
 __all__ = [
@@ -33,7 +41,13 @@ __all__ = [
     "DetectedPlayer",
     "ConfidenceLevel",
     "UncertainZone",
+    "SplayDirectionDetected",
+    "PhotoInput",
     "VisionProcessor",
+    "MockVisionProcessor",
+    "ManualInputProcessor",
+    "InnovationVisionProcessor",
+    "InnovationVisionConfig",
     "StateReconciler",
     "ReconciliationResult",
     "Conflict",
