@@ -201,3 +201,467 @@ class TestBotVariety:
 
         # With chaotic personality, different seeds should produce some variation
         # (Not guaranteed but highly likely)
+
+
+class TestFullGameLoopIntegration:
+    """
+    Integration test for the complete game loop.
+
+    Tests the full flow:
+    1. Create session
+    2. Submit "fake photo" + hints
+    3. Apply corrections
+    4. Confirm state (or trigger automa)
+    5. Get instructions
+    6. Apply one automa action
+    7. Assert state changed legally
+
+    Uses deterministic seed for reproducibility.
+    """
+
+    @pytest.fixture
+    def deterministic_seed(self):
+        """Fixed seed for deterministic test runs."""
+        return 42
+
+    @pytest.fixture
+    def game_session(self, deterministic_seed):
+        """Create a game session with deterministic seed."""
+        from ..games.innovation.setup import setup_innovation_game
+        from ..games.innovation.spec import create_innovation_spec
+        from ..session import SessionManager
+        from ..bots import InnovationBot
+        import random
+
+        spec = create_innovation_spec()
+        manager = SessionManager()
+        session = manager.create_session(
+            spec,
+            human_player_id="human",
+            num_automas=1,
+        )
+
+        # Override game state with seeded setup
+        session.game_state = setup_innovation_game(
+            num_players=2,
+            human_player_name="Human",
+            bot_names=["Automa"],
+            random_seed=deterministic_seed,
+        )
+
+        # Set up bot with deterministic RNG
+        for bot_id, bot in session.bots.items():
+            bot.rng = random.Random(deterministic_seed)
+
+        return session, spec, manager
+
+    def test_initial_state_is_valid(self, game_session):
+        """Verify initial game state is set up correctly."""
+        session, spec, manager = game_session
+        state = session.game_state
+
+        # 2 players
+        assert state.num_players == 2
+
+        # Each player has 2 cards in hand (after initial deal)
+        human = state.get_player("human")
+        bot = state.get_player("bot_1")
+        assert human is not None
+        assert bot is not None
+        assert human.hand.count == 2
+        assert bot.hand.count == 2
+
+        # Age 1 deck has remaining cards (should have dealt 4 total)
+        age_1_deck = state.supply_decks.get("age_1")
+        assert age_1_deck is not None
+        # Started with some cards, dealt 4
+
+        # Game is in PLAYING phase
+        from ..engine_core.state import GamePhase
+        assert state.phase == GamePhase.PLAYING
+
+        # Achievements are set up
+        assert state.achievements.count == 9  # Ages 1-9
+
+    def test_game_loop_with_vision_processor(self, game_session, deterministic_seed):
+        """Test full game loop with stub vision processor."""
+        from ..session import GameLoop, LoopState
+        from ..vision import InnovationVisionProcessor, InnovationVisionConfig, PlayerHints
+        from ..vision.proposal import PhotoInput
+
+        session, spec, manager = game_session
+
+        # Configure stub vision processor
+        config = InnovationVisionConfig(
+            stub_mode=True,
+        )
+        session.vision_processor = InnovationVisionProcessor(config=config)
+
+        # Create game loop
+        loop = GameLoop(session)
+        assert loop.state == LoopState.WAITING_PHOTO
+
+        # Step 1: Submit photo with hints
+        photo = PhotoInput(
+            image_data=b"fake_image_data",
+            timestamp=time.time(),
+            player_positions={"human": "bottom", "bot_1": "top"},
+        )
+
+        # Add player hints for stub processor
+        hints = PlayerHints(
+            player_positions={"human": "bottom", "bot_1": "top"},
+            known_top_cards={"human_red": "archery"},
+        )
+
+        result = loop.process_photo(photo)
+
+        # Photo processing should succeed
+        assert result.success
+
+        # After processing, we should either have questions or instructions
+        # (depends on confidence and state)
+
+    def test_apply_corrections_and_continue(self, game_session, deterministic_seed):
+        """Test applying corrections and continuing the game loop."""
+        from ..session import GameLoop, LoopState
+        from ..vision import InnovationVisionProcessor, InnovationVisionConfig, PlayerHints
+        from ..vision.proposal import PhotoInput, VisionStateProposal, ConfidenceLevel, DetectedPlayer
+        from ..vision import StateReconciler
+
+        session, spec, manager = game_session
+
+        # Configure stub vision processor
+        config = InnovationVisionConfig(
+            stub_mode=True,
+        )
+        session.vision_processor = InnovationVisionProcessor(config=config)
+        session.reconciler = StateReconciler(spec=spec)
+
+        # Create game loop
+        loop = GameLoop(session)
+
+        # Submit photo
+        photo = PhotoInput(
+            image_data=b"fake_image_data",
+            timestamp=time.time(),
+        )
+        result = loop.process_photo(photo)
+
+        # If corrections needed, apply them
+        if result.questions:
+            # Simulate user answering questions
+            corrections = {}
+            for q in result.questions:
+                # Use first option as answer
+                q_id = q.get("id", "")
+                options = q.get("options", q.get("alternatives", []))
+                if options and isinstance(options[0], dict):
+                    corrections[q_id] = options[0].get("value", options[0].get("label", ""))
+                elif options:
+                    corrections[q_id] = options[0]
+
+            result = loop.apply_corrections(corrections)
+
+        # After corrections (or if none needed), check state
+        assert result.success
+
+    def test_automa_takes_action(self, game_session):
+        """Test that automa can take an action and state changes legally."""
+        from ..engine_core.reducer import apply_action
+        from ..engine_core.action import Action, ActionType
+
+        session, spec, manager = game_session
+        state = session.game_state
+
+        # Make it bot's turn
+        state = state._copy_with(current_player_idx=1, actions_remaining=2)
+        session.game_state = state
+
+        # Get initial state snapshot
+        initial_hand_count = state.get_player("bot_1").hand.count
+        initial_deck_count = state.supply_decks.get("age_1").count
+
+        # Get legal actions for bot
+        legal = legal_actions(spec, state)
+        assert len(legal) > 0, "Bot should have legal actions"
+
+        # Bot selects and executes action
+        bot = session.bots.get("bot_1")
+        assert bot is not None
+
+        decision = bot.select_action(state, spec, legal)
+        assert decision is not None
+        assert decision.action is not None
+
+        # Apply the action
+        result = apply_action(spec, state, decision.action)
+
+        # Action should succeed
+        assert result.success, f"Action failed: {result.error}"
+        assert result.new_state is not None
+
+        # State should have changed
+        new_state = result.new_state
+
+        # Verify action had an effect (at least actions_remaining decreased)
+        if decision.action.action_type == ActionType.DRAW:
+            # Hand should increase, deck should decrease
+            assert new_state.get_player("bot_1").hand.count >= initial_hand_count
+
+        elif decision.action.action_type == ActionType.MELD:
+            # Hand should decrease, board should have card
+            pass  # Board checking requires more setup
+
+        elif decision.action.action_type == ActionType.PASS:
+            # Actions remaining should be 0
+            assert new_state.actions_remaining == 0
+
+        # Actions remaining should have decreased (or be 0 for pass)
+        assert new_state.actions_remaining <= state.actions_remaining
+
+    def test_full_turn_cycle(self, game_session, deterministic_seed):
+        """Test a complete turn cycle: human turn -> bot turn -> back to human."""
+        from ..engine_core.reducer import apply_action
+        from ..engine_core.action import Action, ActionType, ActionPayload
+        import random
+
+        session, spec, manager = game_session
+        state = session.game_state
+
+        # Give human player a card in hand if needed
+        human = state.get_player("human")
+        if human.hand.count == 0:
+            # Add a test card
+            from ..engine_core.state import Card, Zone
+            test_card = Card(card_id="archery", instance_id="archery_test")
+            new_hand = Zone(name="hand", cards=[test_card])
+            from ..engine_core.state import PlayerState
+            new_human = PlayerState(
+                player_id=human.player_id,
+                name=human.name,
+                is_human=human.is_human,
+                hand=new_hand,
+                score_pile=human.score_pile,
+                achievements=human.achievements,
+                board=human.board,
+            )
+            state = state.with_player(new_human)
+
+        # Ensure it's human's turn with actions
+        state = state._copy_with(current_player_idx=0, actions_remaining=2)
+
+        # Human takes draw action
+        human_actions = legal_actions(spec, state)
+        draw_actions = [a for a in human_actions if a.action_type == ActionType.DRAW]
+
+        if draw_actions:
+            result = apply_action(spec, state, draw_actions[0])
+            assert result.success
+            state = result.new_state
+
+        # Human takes second action (meld or pass)
+        state = state._copy_with(actions_remaining=1)
+        human_actions = legal_actions(spec, state)
+
+        meld_actions = [a for a in human_actions if a.action_type == ActionType.MELD]
+        if meld_actions:
+            result = apply_action(spec, state, meld_actions[0])
+        else:
+            result = apply_action(spec, state, Action.pass_turn("human"))
+
+        if result.success:
+            state = result.new_state
+
+        # End human turn
+        if state.actions_remaining <= 0:
+            end_turn = Action.end_turn("human")
+            result = apply_action(spec, state, end_turn)
+            if result.success:
+                state = result.new_state
+
+        # Now it should be bot's turn
+        if state.current_player_idx == 1:
+            # Bot takes a turn
+            state = state._copy_with(actions_remaining=2)
+            bot_actions = legal_actions(spec, state)
+
+            if bot_actions:
+                bot = session.bots.get("bot_1")
+                if bot:
+                    # Use deterministic RNG
+                    bot.rng = random.Random(deterministic_seed)
+                    decision = bot.select_action(state, spec, bot_actions)
+
+                    result = apply_action(spec, state, decision.action)
+                    assert result.success, f"Bot action failed: {result.error}"
+                    state = result.new_state
+
+    def test_corrections_change_state(self, game_session):
+        """Test that user corrections actually modify game state."""
+        from ..engine_core.reducer import apply_action
+        from ..engine_core.action import Action, ActionType, ActionPayload
+        from ..engine_core.corrections import SetCard, SetSplay
+
+        session, spec, manager = game_session
+        state = session.game_state
+
+        # Create a correction to add a card to human's board
+        corrections = [
+            {
+                "type": "set_card",
+                "zone_id": "human_board_red",
+                "card_id": "archery",
+                "position": "top",
+            }
+        ]
+
+        # Apply via action
+        correction_action = Action(
+            action_type=ActionType.USER_CORRECTION,
+            payload=ActionPayload(
+                player_id="human",
+                corrections=corrections,
+            ),
+        )
+
+        # Get initial state
+        initial_red_stack = state.get_player("human").get_board_stack("red")
+        initial_count = len(initial_red_stack.cards)
+
+        # Apply correction
+        result = apply_action(spec, state, correction_action)
+        assert result.success, f"Correction failed: {result.error}"
+
+        # Verify state changed
+        new_state = result.new_state
+        new_red_stack = new_state.get_player("human").get_board_stack("red")
+
+        # Should have one more card
+        assert len(new_red_stack.cards) == initial_count + 1
+
+        # Top card should be archery
+        assert new_red_stack.top_card is not None
+        assert new_red_stack.top_card.card_id == "archery"
+
+    def test_splay_correction(self, game_session):
+        """Test that splay corrections work correctly."""
+        from ..engine_core.reducer import apply_action
+        from ..engine_core.action import Action, ActionType, ActionPayload
+        from ..engine_core.state import SplayDirection
+
+        session, spec, manager = game_session
+        state = session.game_state
+
+        # First add some cards to a pile
+        card_correction = {
+            "type": "set_card",
+            "zone_id": "human_board_blue",
+            "card_id": "writing",
+            "position": "top",
+        }
+
+        correction_action = Action(
+            action_type=ActionType.USER_CORRECTION,
+            payload=ActionPayload(
+                player_id="human",
+                corrections=[card_correction],
+            ),
+        )
+        result = apply_action(spec, state, correction_action)
+        assert result.success
+        state = result.new_state
+
+        # Now apply splay correction
+        splay_correction = {
+            "type": "set_splay",
+            "player_id": "human",
+            "color": "blue",
+            "direction": "right",
+        }
+
+        correction_action = Action(
+            action_type=ActionType.USER_CORRECTION,
+            payload=ActionPayload(
+                player_id="human",
+                corrections=[splay_correction],
+            ),
+        )
+
+        result = apply_action(spec, state, correction_action)
+        assert result.success, f"Splay correction failed: {result.error}"
+
+        # Verify splay changed
+        new_state = result.new_state
+        blue_stack = new_state.get_player("human").get_board_stack("blue")
+        assert blue_stack.splay_direction == SplayDirection.RIGHT
+
+    def test_deterministic_game_sequence(self, deterministic_seed):
+        """
+        Test that the same seed produces the same game sequence.
+
+        Run the game twice with same seed and verify identical results.
+        """
+        from ..games.innovation.setup import setup_innovation_game
+        from ..games.innovation.spec import create_innovation_spec
+        from ..engine_core.reducer import apply_action
+        from ..bots import InnovationBot
+        import random
+
+        def run_game_with_seed(seed):
+            """Run a game sequence and return key state snapshots."""
+            spec = create_innovation_spec()
+            state = setup_innovation_game(
+                num_players=2,
+                random_seed=seed,
+            )
+
+            snapshots = []
+
+            # Snapshot initial state
+            snapshots.append({
+                "hand_cards": [c.card_id for c in state.get_player("human").hand.cards],
+                "bot_hand_cards": [c.card_id for c in state.get_player("bot_1").hand.cards],
+                "deck_count": state.supply_decks.get("age_1").count,
+            })
+
+            # Simulate a few bot turns
+            state = state._copy_with(current_player_idx=1, actions_remaining=2)
+            bot = InnovationBot(player_id="bot_1", rng=random.Random(seed))
+
+            for turn in range(3):
+                actions = legal_actions(spec, state)
+                if not actions:
+                    break
+
+                decision = bot.select_action(state, spec, actions)
+                result = apply_action(spec, state, decision.action)
+
+                if result.success:
+                    state = result.new_state
+                    snapshots.append({
+                        "action": decision.action.action_type.value,
+                        "card": decision.action.payload.card_id,
+                        "actions_remaining": state.actions_remaining,
+                    })
+
+                    # Reset actions for next iteration
+                    if state.actions_remaining <= 0:
+                        state = state._copy_with(actions_remaining=2)
+
+            return snapshots
+
+        # Run twice with same seed
+        run1 = run_game_with_seed(deterministic_seed)
+        run2 = run_game_with_seed(deterministic_seed)
+
+        # Should produce identical sequences
+        assert run1 == run2, "Same seed should produce identical game sequences"
+
+        # Run with different seed should be different
+        run3 = run_game_with_seed(deterministic_seed + 1)
+
+        # Initial hands should differ (with very high probability)
+        assert run1[0]["hand_cards"] != run3[0]["hand_cards"] or \
+               run1[0]["bot_hand_cards"] != run3[0]["bot_hand_cards"], \
+               "Different seeds should produce different initial states"

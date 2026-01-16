@@ -126,6 +126,38 @@ class ManualInputProcessor(VisionProcessor):
 
 
 @dataclass
+class PlayerHints:
+    """
+    Typed hints about player positions and known state.
+
+    Used to help vision processing when positions are known.
+    """
+    # Player positions: player_id -> position (top, bottom, left, right)
+    player_positions: dict[str, str] = field(default_factory=dict)
+
+    # Known hands (if declared by user)
+    known_hands: dict[str, list[str]] = field(default_factory=dict)
+
+    # Known top cards (if user confirms)
+    known_top_cards: dict[str, str] = field(default_factory=dict)  # "player_color" -> card_id
+
+    # Known splay directions
+    known_splays: dict[str, str] = field(default_factory=dict)  # "player_color" -> direction
+
+    @classmethod
+    def from_dict(cls, data: dict | None) -> PlayerHints:
+        """Create from API request data."""
+        if not data:
+            return cls()
+        return cls(
+            player_positions=data.get("player_positions", {}),
+            known_hands=data.get("known_hands", {}),
+            known_top_cards=data.get("known_top_cards", {}),
+            known_splays=data.get("known_splays", {}),
+        )
+
+
+@dataclass
 class InnovationVisionConfig:
     """
     Configuration for Innovation-specific vision processing.
@@ -148,15 +180,27 @@ class InnovationVisionConfig:
     # Reference images for cards (for matching)
     card_reference_path: str | None = None
 
+    # Stub mode: use deterministic fake detection
+    stub_mode: bool = True
+
+    # Default cards for stub mode (per color)
+    stub_cards: dict[str, list[str]] = field(default_factory=lambda: {
+        "red": ["archery", "metalworking"],
+        "yellow": ["agriculture", "domestication"],
+        "green": ["the_wheel", "clothing"],
+        "blue": ["writing", "pottery"],
+        "purple": ["code_of_laws", "mysticism"],
+    })
+
 
 class InnovationVisionProcessor(VisionProcessor):
     """
     Vision processor specialized for Innovation.
 
-    STUB: CV implementation deferred.
-    Interface is complete for integration.
+    For MVP, uses stub detection that returns deterministic results
+    based on player hints. Real CV implementation deferred.
 
-    For MVP, this detects:
+    Detects:
     - Top card of each pile (age, color)
     - Splay direction
     - Achievements in play
@@ -171,23 +215,23 @@ class InnovationVisionProcessor(VisionProcessor):
         """
         Process an Innovation game photo.
 
-        STUB: Real implementation would:
-        1. Preprocess image
-        2. Detect card regions
-        3. Classify cards by age/color
-        4. Detect splay directions
-        5. Build proposal
+        Uses stub detection for MVP - returns deterministic results
+        based on player hints provided.
         """
         proposal_id = str(uuid.uuid4())
         timestamp = photo.timestamp or time.time()
 
-        # STUB: For now, return empty proposal with uncertainties
-        # indicating we need user input
+        # Parse player hints
+        hints = PlayerHints.from_dict(photo.player_positions)
 
-        players = self._detect_players(photo)
+        if self.config.stub_mode:
+            return self._stub_process(proposal_id, timestamp, photo, hints)
+
+        # Real CV processing (not implemented)
+        players = self._detect_players(photo, hints)
         achievements = self._detect_achievements(photo)
         deck_sizes = self._detect_deck_sizes(photo)
-        uncertainties = self._identify_uncertainties(players, achievements)
+        uncertainties = self._identify_uncertainties(players, achievements, hints)
 
         confidence = self._calculate_confidence(players, uncertainties)
 
@@ -203,20 +247,168 @@ class InnovationVisionProcessor(VisionProcessor):
             photo_path=photo.image_path,
         )
 
+    def _stub_process(
+        self,
+        proposal_id: str,
+        timestamp: float,
+        photo: PhotoInput,
+        hints: PlayerHints,
+    ) -> VisionStateProposal:
+        """
+        Deterministic stub processing for MVP testing.
+
+        Returns partial results + uncertainties based on hints.
+        """
+        players = []
+        uncertainties = []
+
+        # If no player positions given, create uncertainty
+        if not hints.player_positions:
+            uncertainties.append(
+                UncertainZone(
+                    zone_id="players",
+                    zone_type="player_detection",
+                    uncertainty_type="missing_data",
+                    question="Could not detect player areas. How many players are playing?",
+                    alternatives=[2, 3, 4],
+                )
+            )
+        else:
+            # Build detected players from hints
+            for player_id, position in hints.player_positions.items():
+                board_piles = {}
+
+                # For each color, either use known card or create uncertainty
+                for color in ["red", "yellow", "green", "blue", "purple"]:
+                    key = f"{player_id}_{color}"
+
+                    if key in hints.known_top_cards:
+                        # User already told us the top card
+                        card_id = hints.known_top_cards[key]
+                        board_piles[color] = DetectedZone(
+                            zone_type="board_pile",
+                            player_id=player_id,
+                            color=color,
+                            cards=[
+                                DetectedCard(
+                                    detected_name=card_id,
+                                    matched_card_id=card_id,
+                                    confidence=ConfidenceLevel.HIGH,
+                                    confidence_score=1.0,
+                                )
+                            ],
+                            splay_direction=self._parse_splay(
+                                hints.known_splays.get(key, "none")
+                            ),
+                            card_count=1,
+                            card_count_approximate=False,
+                            confidence=ConfidenceLevel.HIGH,
+                        )
+                    elif self.config.stub_cards.get(color):
+                        # Use stub cards with medium confidence
+                        stub_card = self.config.stub_cards[color][0]
+                        board_piles[color] = DetectedZone(
+                            zone_type="board_pile",
+                            player_id=player_id,
+                            color=color,
+                            cards=[
+                                DetectedCard(
+                                    detected_name=stub_card,
+                                    matched_card_id=stub_card,
+                                    confidence=ConfidenceLevel.MEDIUM,
+                                    confidence_score=0.7,
+                                )
+                            ],
+                            splay_direction=SplayDirectionDetected.NONE,
+                            card_count=1,
+                            card_count_approximate=True,
+                            confidence=ConfidenceLevel.MEDIUM,
+                        )
+                        # Add uncertainty for this pile
+                        uncertainties.append(
+                            UncertainZone(
+                                zone_id=f"{player_id}_board_{color}",
+                                zone_type="board_pile",
+                                uncertainty_type="card_identity",
+                                question=f"What is the top card of {player_id}'s {color} pile?",
+                                player_id=player_id,
+                                detected_value=stub_card,
+                                alternatives=self.config.stub_cards.get(color, []),
+                            )
+                        )
+
+                # Build detected player
+                players.append(
+                    DetectedPlayer(
+                        player_id=player_id,
+                        player_position=position,
+                        board_piles=board_piles,
+                        score_pile=None,
+                        score_pile_count=0,
+                        achievements=[],
+                        hand=None,
+                        hand_count=hints.known_hands.get(player_id, []) and len(hints.known_hands[player_id]) or None,
+                        hand_declared=player_id in hints.known_hands,
+                    )
+                )
+
+        # Stub deck sizes
+        deck_sizes = {}
+        for age in range(1, 11):
+            deck_sizes[str(age)] = max(0, 10 - age)  # Decreasing by age
+
+        # Calculate confidence
+        confidence = self._calculate_confidence(players, uncertainties)
+
+        return VisionStateProposal(
+            proposal_id=proposal_id,
+            timestamp=timestamp,
+            confidence_score=confidence,
+            confidence_level=self._score_to_level(confidence),
+            players=players,
+            achievements_available=self._stub_achievements(),
+            deck_sizes=deck_sizes,
+            uncertain_zones=uncertainties,
+            photo_path=photo.image_path if hasattr(photo, 'image_path') else None,
+        )
+
+    def _stub_achievements(self) -> list[DetectedCard]:
+        """Return stub achievements for testing."""
+        achievements = []
+        for age in range(1, 10):
+            achievements.append(
+                DetectedCard(
+                    detected_age=age,
+                    detected_name=f"achievement_{age}",
+                    matched_card_id=f"achievement_{age}",
+                    confidence=ConfidenceLevel.HIGH,
+                    confidence_score=0.95,
+                )
+            )
+        return achievements
+
+    def _parse_splay(self, direction: str) -> SplayDirectionDetected:
+        """Parse splay direction string."""
+        direction_map = {
+            "none": SplayDirectionDetected.NONE,
+            "left": SplayDirectionDetected.LEFT,
+            "right": SplayDirectionDetected.RIGHT,
+            "up": SplayDirectionDetected.UP,
+        }
+        return direction_map.get(direction.lower(), SplayDirectionDetected.UNKNOWN)
+
     def supports_format(self, format: str) -> bool:
         return format.lower() in {"jpg", "jpeg", "png", "webp"}
 
-    def _detect_players(self, photo: PhotoInput) -> list[DetectedPlayer]:
+    def _detect_players(self, photo: PhotoInput, hints: PlayerHints) -> list[DetectedPlayer]:
         """
         Detect player areas and their board states.
 
-        STUB: Returns empty for now.
-        Real implementation would use object detection.
+        Uses hints if available, otherwise returns empty.
         """
-        # If player positions are known from hints, use those
-        if photo.player_positions:
+        if hints.player_positions:
             players = []
-            for player_id, position in photo.player_positions.items():
+            for player_id, position in hints.player_positions.items():
                 players.append(
                     DetectedPlayer(
                         player_id=player_id,
@@ -227,37 +419,25 @@ class InnovationVisionProcessor(VisionProcessor):
                     )
                 )
             return players
-
         return []
 
     def _detect_achievements(self, photo: PhotoInput) -> list[DetectedCard]:
-        """
-        Detect available achievements.
-
-        STUB: Returns empty for now.
-        """
+        """Detect available achievements."""
         return []
 
     def _detect_deck_sizes(self, photo: PhotoInput) -> dict[str, int]:
-        """
-        Detect approximate deck sizes.
-
-        STUB: Returns empty for now.
-        Real implementation would estimate pile heights.
-        """
+        """Detect approximate deck sizes."""
         return {}
 
     def _identify_uncertainties(
         self,
         players: list[DetectedPlayer],
         achievements: list[DetectedCard],
+        hints: PlayerHints,
     ) -> list[UncertainZone]:
-        """
-        Identify zones where we're uncertain and need user input.
-        """
+        """Identify zones where we're uncertain and need user input."""
         uncertainties = []
 
-        # If we detected no players, that's uncertain
         if not players:
             uncertainties.append(
                 UncertainZone(
@@ -281,9 +461,12 @@ class InnovationVisionProcessor(VisionProcessor):
             return 0.1
 
         if uncertainties:
-            return 0.5 - (len(uncertainties) * 0.1)
+            # More uncertainties = lower confidence
+            base = 0.8
+            penalty = len(uncertainties) * 0.1
+            return max(0.3, base - penalty)
 
-        return 0.8
+        return 0.9
 
     def _score_to_level(self, score: float) -> ConfidenceLevel:
         """Convert numeric score to confidence level."""

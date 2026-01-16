@@ -147,6 +147,30 @@ class Action:
             payload=ActionPayload(corrections=corrections),
         )
 
+    @classmethod
+    def pass_turn(cls, player_id: str) -> Action:
+        """Factory for pass action (skip remaining actions)."""
+        return cls(
+            action_type=ActionType.PASS,
+            payload=ActionPayload(player_id=player_id),
+        )
+
+    @classmethod
+    def end_turn(cls, player_id: str) -> Action:
+        """Factory for end turn action."""
+        return cls(
+            action_type=ActionType.END_TURN,
+            payload=ActionPayload(player_id=player_id),
+        )
+
+    @classmethod
+    def start_turn(cls, player_id: str | None = None) -> Action:
+        """Factory for start turn action."""
+        return cls(
+            action_type=ActionType.START_TURN,
+            payload=ActionPayload(player_id=player_id),
+        )
+
 
 @dataclass
 class ActionResult:

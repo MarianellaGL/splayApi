@@ -31,6 +31,7 @@ from .processor import (
     ManualInputProcessor,
     InnovationVisionProcessor,
     InnovationVisionConfig,
+    PlayerHints,
 )
 from .reconciler import StateReconciler, ReconciliationResult, Conflict
 
@@ -48,6 +49,7 @@ __all__ = [
     "ManualInputProcessor",
     "InnovationVisionProcessor",
     "InnovationVisionConfig",
+    "PlayerHints",
     "StateReconciler",
     "ReconciliationResult",
     "Conflict",

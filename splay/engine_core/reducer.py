@@ -15,8 +15,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .state import GameState, GamePhase, PlayerState, Zone, Card
+from .state import GameState, GamePhase, PlayerState, Zone, Card, ZoneStack, SplayDirection
 from .action import Action, ActionType, ActionResult
+from .corrections import (
+    Correction, SetCard, SetSplay, ConfirmZone, AnswerQuestion,
+    SetCardCount, SetDeckSize, CorrectionBatch, parse_corrections,
+)
 
 if TYPE_CHECKING:
     from ..spec_schema import GameSpec
@@ -372,15 +376,219 @@ class Reducer:
         return ActionResult.failure("Vision update not yet implemented")
 
     def _handle_user_correction(self, state: GameState, action: Action) -> ActionResult:
-        """Handle manual state correction from user."""
-        corrections = action.payload.corrections
-        if not corrections:
+        """
+        Handle manual state correction from user.
+
+        The user is authoritative - corrections override detected state.
+
+        Supports:
+        - SetCard: Set a card in a zone
+        - SetSplay: Set splay direction
+        - ConfirmZone: Confirm detected state is correct
+        - AnswerQuestion: Answer a clarification question
+        - SetCardCount: Set card count for a zone
+        - SetDeckSize: Set deck size for an age
+        """
+        corrections_data = action.payload.corrections
+        if not corrections_data:
             return ActionResult.failure("No corrections provided")
 
-        # STUB: Apply corrections to state
-        # This is a privileged operation - user is authoritative
+        # Parse corrections if they're raw dicts
+        if isinstance(corrections_data, list) and corrections_data:
+            if isinstance(corrections_data[0], dict):
+                try:
+                    corrections = parse_corrections(corrections_data)
+                except (KeyError, ValueError) as e:
+                    return ActionResult.failure(f"Invalid correction format: {e}")
+            else:
+                corrections = corrections_data  # Already parsed
+        elif isinstance(corrections_data, CorrectionBatch):
+            corrections = corrections_data.corrections
+        else:
+            return ActionResult.failure("Corrections must be a list")
 
-        return ActionResult.failure("User correction not yet implemented")
+        # Apply each correction
+        new_state = state
+        changes = []
+        for correction in corrections:
+            result = self._apply_single_correction(new_state, correction)
+            if not result.success:
+                return result
+            new_state = result.new_state
+            changes.extend(result.state_changes)
+
+        return ActionResult.success_with_state(
+            new_state,
+            changes=changes,
+        )
+
+    def _apply_single_correction(
+        self, state: GameState, correction: Correction
+    ) -> ActionResult:
+        """Apply a single correction to the state."""
+        if isinstance(correction, SetCard):
+            return self._apply_set_card(state, correction)
+        elif isinstance(correction, SetSplay):
+            return self._apply_set_splay(state, correction)
+        elif isinstance(correction, ConfirmZone):
+            return self._apply_confirm_zone(state, correction)
+        elif isinstance(correction, AnswerQuestion):
+            return self._apply_answer_question(state, correction)
+        elif isinstance(correction, SetCardCount):
+            return self._apply_set_card_count(state, correction)
+        elif isinstance(correction, SetDeckSize):
+            return self._apply_set_deck_size(state, correction)
+        else:
+            return ActionResult.failure(f"Unknown correction type: {type(correction)}")
+
+    def _apply_set_card(self, state: GameState, correction: SetCard) -> ActionResult:
+        """Apply a SetCard correction."""
+        zone_id = correction.zone_id
+        card_id = correction.card_id
+
+        # Parse zone_id to determine player and zone type
+        # Format: "{player_id}_{zone_type}" or "{zone_type}" for shared zones
+        parts = zone_id.rsplit("_", 1)
+
+        # Check if it's a player board pile
+        if "_board_" in zone_id:
+            # Format: "{player_id}_board_{color}"
+            parts = zone_id.split("_board_")
+            if len(parts) != 2:
+                return ActionResult.failure(f"Invalid board zone format: {zone_id}")
+
+            player_id = correction.player_id or parts[0]
+            color = parts[1]
+
+            player = state.get_player(player_id)
+            if not player:
+                return ActionResult.failure(f"Player {player_id} not found")
+
+            # Create the card
+            card = Card(card_id=card_id, instance_id=f"{card_id}_corrected")
+
+            # Update the stack
+            stack = player.get_board_stack(color)
+            if correction.position == "top":
+                new_stack = stack.add_top(card)
+            elif correction.position == "bottom":
+                new_stack = stack.add_bottom(card)
+            else:
+                new_stack = stack.add_top(card)  # Default to top
+
+            new_player = player.with_board_stack(color, new_stack)
+            new_state = state.with_player(new_player)
+
+            return ActionResult.success_with_state(
+                new_state,
+                changes=[f"Set {card_id} on {player_id}'s {color} pile"],
+            )
+
+        elif "_hand" in zone_id or zone_id.endswith("_hand"):
+            # Player hand
+            player_id = correction.player_id or zone_id.replace("_hand", "")
+            player = state.get_player(player_id)
+            if not player:
+                return ActionResult.failure(f"Player {player_id} not found")
+
+            card = Card(card_id=card_id, instance_id=f"{card_id}_corrected")
+            new_hand = player.hand.add(card)
+            new_player = PlayerState(
+                player_id=player.player_id,
+                name=player.name,
+                is_human=player.is_human,
+                hand=new_hand,
+                score_pile=player.score_pile,
+                achievements=player.achievements,
+                board=player.board,
+            )
+            new_state = state.with_player(new_player)
+
+            return ActionResult.success_with_state(
+                new_state,
+                changes=[f"Added {card_id} to {player_id}'s hand"],
+            )
+
+        else:
+            return ActionResult.failure(f"Zone {zone_id} not yet supported for SetCard")
+
+    def _apply_set_splay(self, state: GameState, correction: SetSplay) -> ActionResult:
+        """Apply a SetSplay correction."""
+        player = state.get_player(correction.player_id)
+        if not player:
+            return ActionResult.failure(f"Player {correction.player_id} not found")
+
+        direction_map = {
+            "none": SplayDirection.NONE,
+            "left": SplayDirection.LEFT,
+            "right": SplayDirection.RIGHT,
+            "up": SplayDirection.UP,
+        }
+        direction = direction_map.get(correction.direction.lower())
+        if direction is None:
+            return ActionResult.failure(f"Invalid splay direction: {correction.direction}")
+
+        stack = player.get_board_stack(correction.color)
+        new_stack = stack.set_splay(direction)
+        new_player = player.with_board_stack(correction.color, new_stack)
+        new_state = state.with_player(new_player)
+
+        return ActionResult.success_with_state(
+            new_state,
+            changes=[f"Set {correction.player_id}'s {correction.color} splay to {correction.direction}"],
+        )
+
+    def _apply_confirm_zone(self, state: GameState, correction: ConfirmZone) -> ActionResult:
+        """Apply a ConfirmZone correction (no-op, just acknowledges)."""
+        return ActionResult.success_with_state(
+            state,
+            changes=[f"Confirmed zone {correction.zone_id}"],
+        )
+
+    def _apply_answer_question(self, state: GameState, correction: AnswerQuestion) -> ActionResult:
+        """
+        Apply an AnswerQuestion correction.
+
+        The answer may require further processing depending on question type.
+        For now, just record the answer.
+        """
+        # Store answer in metadata for reconciler to use
+        new_metadata = state.metadata.copy()
+        answers = new_metadata.get("correction_answers", {})
+        answers[correction.question_id] = correction.option_id
+        new_metadata["correction_answers"] = answers
+
+        new_state = state._copy_with(metadata=new_metadata)
+        return ActionResult.success_with_state(
+            new_state,
+            changes=[f"Answered question {correction.question_id}: {correction.option_id}"],
+        )
+
+    def _apply_set_card_count(self, state: GameState, correction: SetCardCount) -> ActionResult:
+        """Apply a SetCardCount correction (metadata only for now)."""
+        new_metadata = state.metadata.copy()
+        counts = new_metadata.get("corrected_counts", {})
+        counts[correction.zone_id] = correction.count
+        new_metadata["corrected_counts"] = counts
+
+        new_state = state._copy_with(metadata=new_metadata)
+        return ActionResult.success_with_state(
+            new_state,
+            changes=[f"Set card count for {correction.zone_id} to {correction.count}"],
+        )
+
+    def _apply_set_deck_size(self, state: GameState, correction: SetDeckSize) -> ActionResult:
+        """Apply a SetDeckSize correction (metadata only for now)."""
+        new_metadata = state.metadata.copy()
+        deck_sizes = new_metadata.get("corrected_deck_sizes", {})
+        deck_sizes[f"age_{correction.age}"] = correction.count
+        new_metadata["corrected_deck_sizes"] = deck_sizes
+
+        new_state = state._copy_with(metadata=new_metadata)
+        return ActionResult.success_with_state(
+            new_state,
+            changes=[f"Set age {correction.age} deck size to {correction.count}"],
+        )
 
     def _calculate_draw_age(self, state: GameState, player: PlayerState) -> int:
         """Calculate which age to draw from based on board state."""
