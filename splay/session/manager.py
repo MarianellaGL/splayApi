@@ -1,13 +1,31 @@
 """
 Session Manager - Creates and manages game sessions.
 
-Lifecycle:
-1. User uploads rules → compile to spec (cached)
-2. User starts session → create ephemeral session
-3. During game → process photos, run automas
-4. Game ends → destroy session
+LIFECYCLE (Non-Negotiable):
+1. User uploads rules → compile to spec (cached by rules hash)
+2. User starts session → create ephemeral session (in-memory only)
+3. During game:
+   - User takes photo of physical table
+   - Vision proposes state (non-authoritative)
+   - User corrects ambiguities
+   - Engine validates and updates canonical state
+   - Engine runs automa turns
+   - App instructs human what to do physically
+4. Game ends → session destroyed, ALL state deleted
+5. User can:
+   - Replay (reuse cached spec, new session)
+   - New game (new rules, compile, new session)
 
-No database. State is ephemeral.
+PERSISTENCE RULES:
+- NO database for gameplay
+- Game state is ephemeral (session-scoped only)
+- Only persistence: cached compiled specs (by rules hash)
+- State must always be reconstructible from a new photo
+
+AUTOMA CONSTRAINTS:
+- Automa NEVER draws from hidden digital deck
+- Automa only knows what's visible in photos
+- Automa instructs human to move physical cards
 """
 
 from __future__ import annotations

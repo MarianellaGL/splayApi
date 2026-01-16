@@ -1,0 +1,24 @@
+# Render Blueprint for Splay Engine
+# Deploys using Dockerfile
+# Deploy with: https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: splay-engine
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeploy: true
+
+    # Plan (use 'starter' or higher for production)
+    plan: free
+
+    # Environment variables
+    envVars:
+      - key: SPLAY_CACHE_DIR
+        value: /tmp/splay_cache
+      - key: SPLAY_ENV
+        value: production
+      - key: ALLOWED_ORIGINS
+        value: "*"

@@ -1,0 +1,11 @@
+# Splay Engine Dependencies
+# Generated from pyproject.toml [api] extras
+
+# API Framework
+fastapi>=0.100
+uvicorn[standard]>=0.23
+python-multipart>=0.0.6
+websockets>=11.0
+
+# HTTP client (for health checks in tests)
+httpx>=0.24

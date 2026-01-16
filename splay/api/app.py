@@ -13,12 +13,25 @@ Endpoints:
     WS     /api/v1/sessions/{id}/ws     WebSocket for real-time updates
 
 All responses are JSON. Photos are multipart/form-data.
+
+Deployment:
+    # Local
+    uvicorn splay.api.app:app --reload
+
+    # Production (Render)
+    uvicorn splay.api.app:app --host 0.0.0.0 --port $PORT
 """
 
 from __future__ import annotations
 from typing import Any
 from dataclasses import asdict
 import json
+import os
+
+# Environment configuration
+SPLAY_ENV = os.getenv("SPLAY_ENV", "development")
+SPLAY_CACHE_DIR = os.getenv("SPLAY_CACHE_DIR", None)
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 
 # Framework-agnostic interface
 # The actual FastAPI app is created in create_app()
@@ -62,16 +75,19 @@ def create_app(service=None):
     )
 
     # CORS for mobile app
+    # Set ALLOWED_ORIGINS env var for production (comma-separated)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # Configure appropriately for production
+        allow_origins=ALLOWED_ORIGINS,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
-    # Service instance
-    api_service = service or APIService()
+    # Service instance with optional cache directory
+    from ..rule_compiler import RuleCompiler
+    rule_compiler = RuleCompiler(cache_dir=SPLAY_CACHE_DIR) if SPLAY_CACHE_DIR else RuleCompiler()
+    api_service = service or APIService(rule_compiler=rule_compiler)
 
     # WebSocket connections
     ws_connections: dict[str, list[WebSocket]] = {}
