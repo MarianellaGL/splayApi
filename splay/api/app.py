@@ -22,8 +22,7 @@ Deployment:
     uvicorn splay.api.app:app --host 0.0.0.0 --port $PORT
 """
 
-from __future__ import annotations
-from typing import Any
+from typing import Any, Optional, Annotated
 from dataclasses import asdict
 import json
 import os
@@ -187,8 +186,8 @@ def create_app(service=None):
     @app.post("/api/v1/sessions/{session_id}/photo")
     async def upload_photo(
         session_id: str,
-        photo: UploadFile = File(...),
-        player_hints: str = Form(None),  # JSON string
+        photo: Annotated[UploadFile, File(description="Photo of the game table")],
+        player_hints: Annotated[Optional[str], Form(description="JSON string with player position hints")] = None,
     ):
         """
         Upload a photo of the game table.
